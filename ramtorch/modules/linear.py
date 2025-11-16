@@ -18,6 +18,38 @@ from torch.profiler import record_function  # just for profiling
 # --- Per-device global state registry ---
 _DEVICE_STATE = {}
 
+# thanks to Nerogar for fast stochastic pytorch implementation
+# https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
+def to_stochastic(tensor: torch.Tensor, 
+    target_dtype: torch.dtype,
+    non_blocking: bool = False) -> torch.Tensor:
+    """Apply stochastic rounding only for float32 → bfloat16 conversions."""
+    if tensor is None:
+        return None
+    
+    # Only use stochastic rounding for float32 → bfloat16 downcasts
+    if tensor.dtype == torch.float32 and target_dtype == torch.bfloat16:
+        with torch.no_grad():
+            # create a random 16 bit integer using torch.randint with explicit shape
+            result = torch.randint_like(
+                tensor,
+                dtype=torch.int32,
+                low=0,
+                high=(1 << 16),
+            )
+            
+            # add the random number to the lower 16 bit of the mantissa
+            result.add_(tensor.view(dtype=torch.int32))
+
+            # mask off the lower 16 bit of the mantissa
+            result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
+            
+            # Convert the randomized float32 to bfloat16 (truncating the lower bits)
+            return result.view(dtype=torch.float32).to(dtype=torch.bfloat16, non_blocking=non_blocking)
+    
+    # Standard deterministic rounding for all other cases
+    return tensor.to(target_dtype, non_blocking=non_blocking)
+
 
 def _get_device_state(device=torch.cuda.current_device()):
     """Get or initialize per-device state."""
@@ -199,9 +231,9 @@ class BouncingLinearFn(torch.autograd.Function):
             # Manual casting when autocast is enabled
             if autocast_enabled:
                 x_compute = x.to(autocast_dtype)
-                w_compute = w_buffers[selected_buffer].to(autocast_dtype)
+                w_compute = to_stochastic(w_buffers[selected_buffer], autocast_dtype)
                 b_compute = (
-                    b_buffers[selected_buffer].to(autocast_dtype)
+                    to_stochastic(b_buffers[selected_buffer], autocast_dtype)
                     if b_buffers[selected_buffer] is not None
                     else None
                 )
@@ -314,7 +346,7 @@ class BouncingLinearFn(torch.autograd.Function):
             if ctx.autocast_enabled:
                 grad_out_compute = grad_out.to(ctx.autocast_dtype)
                 x_compute = x.to(ctx.autocast_dtype)
-                w_compute = w_bwd_buffers[selected_buffer].to(ctx.autocast_dtype)
+                w_compute = to_stochastic(w_bwd_buffers[selected_buffer], ctx.autocast_dtype)
 
                 # compute input grad
                 grad_input = grad_out_compute @ w_compute
