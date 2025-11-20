@@ -16,7 +16,7 @@ classifiers = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["ramtorch"]
+include = ['ramtorch*']
 
 [project.urls]
 Homepage = "https://github.com/lodestone-rock/RamTorch"
