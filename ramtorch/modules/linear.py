@@ -22,7 +22,8 @@ _DEVICE_STATE = {}
 # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
 def to_stochastic(tensor: torch.Tensor, 
     target_dtype: torch.dtype,
-    non_blocking: bool = False) -> torch.Tensor:
+    non_blocking: bool = False,
+    device: str|torch.device = torch.cuda.current_device()) -> torch.Tensor:
     """Apply stochastic rounding only for float32 → bfloat16 conversions."""
     if tensor is None:
         return None
@@ -45,7 +46,7 @@ def to_stochastic(tensor: torch.Tensor,
             result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
             
             # Convert the randomized float32 to bfloat16 (truncating the lower bits)
-            return result.view(dtype=torch.float32).to(dtype=torch.bfloat16, non_blocking=non_blocking)
+            return result.view(dtype=torch.float32).to(dtype=torch.bfloat16, device=device, non_blocking=non_blocking)
     
     # Standard deterministic rounding for all other cases
     return tensor.to(target_dtype, non_blocking=non_blocking)
@@ -357,7 +358,7 @@ class BouncingLinearFn(torch.autograd.Function):
                 )
                 w_grad_buffers[selected_buffer] = (
                     grad_out_compute.flatten(0, -2).T @ x_compute.flatten(0, -2)
-                ).to(weight_cpu.dtype)
+                ).float() #.to(weight_cpu.dtype)
             else:
                 # compute input grad
                 grad_input = grad_out @ w_bwd_buffers[selected_buffer]
@@ -368,7 +369,7 @@ class BouncingLinearFn(torch.autograd.Function):
                 )
                 w_grad_buffers[selected_buffer] = grad_out.flatten(0, -2).T @ x.flatten(
                     0, -2
-                )
+                ).float()
 
             # gradient accumulation is being performed directly
             with record_function(
@@ -385,7 +386,7 @@ class BouncingLinearFn(torch.autograd.Function):
                     # accumulate weight
                     w_grad_buffers[selected_buffer] += w_grad_accum_buffers[
                         selected_buffer
-                    ]
+                    ].float()
 
                 # invoke post accum hooks on weight gradient
                 # use temporary reference to simplify post accum ipl
@@ -400,10 +401,10 @@ class BouncingLinearFn(torch.autograd.Function):
                 # Keep bias gradient in fp32 for numerical stability when autocast is enabled
                 if ctx.autocast_enabled:
                     b_grad_buffers[selected_buffer] = (
-                        grad_out.float().sum(dim=reduce_dims).to(bias_cpu.dtype)
+                        grad_out.float().sum(dim=reduce_dims).float() #.to(bias_cpu.dtype)
                     )
                 else:
-                    b_grad_buffers[selected_buffer] = grad_out.sum(dim=reduce_dims)
+                    b_grad_buffers[selected_buffer] = grad_out.sum(dim=reduce_dims).float()
 
                 with record_function(
                     "backward_bias_grad_accumulate"
@@ -419,7 +420,7 @@ class BouncingLinearFn(torch.autograd.Function):
                         # accumulate bias
                         b_grad_buffers[selected_buffer] += b_grad_accum_buffers[
                             selected_buffer
-                        ]
+                        ].float()
 
                     # invoke post accum hooks on bias gradient
                     # use temporary reference to simplify post accum ipl
@@ -446,14 +447,12 @@ class BouncingLinearFn(torch.autograd.Function):
                 )
                 # transfer_weight_backward_start_event.record()
                 if w_grad_buffers[selected_buffer] is not None:
-                    weight_cpu.grad = w_grad_buffers[selected_buffer].to(
-                        "cpu", non_blocking=True
-                    )
+                    weight_cpu.grad = to_stochastic(w_grad_buffers[selected_buffer], target_dtype=weight_cpu.dtype, device="cpu", non_blocking=True)
 
                 if bias_cpu is not None:
                     if b_grad_buffers[selected_buffer] is not None:
                         bias_cpu.grad = (
-                            b_grad_buffers[selected_buffer].to("cpu", non_blocking=True)
+                            to_stochastic(b_grad_buffers[selected_buffer], target_dtype=bias_cpu.dtype, device="cpu", non_blocking=True)
                             if bias_cpu is not None
                             else None
                         )
