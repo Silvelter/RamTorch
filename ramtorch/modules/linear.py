@@ -23,7 +23,7 @@ _DEVICE_STATE = {}
 def to_stochastic(tensor: torch.Tensor, 
     target_dtype: torch.dtype,
     non_blocking: bool = False,
-    device: str|torch.device = torch.cuda.current_device()) -> torch.Tensor:
+    device: str|torch.device = None) -> torch.Tensor:
     """Apply stochastic rounding only for float32 → bfloat16 conversions."""
     if tensor is None:
         return None
