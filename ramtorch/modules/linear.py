@@ -366,14 +366,14 @@ class BouncingLinearFn(torch.autograd.Function):
             else:
                 # compute input grad
                 grad_input = grad_out @ w_bwd_buffers[selected_buffer]
-
                 # this must launch after the transfer stream is done
                 torch.cuda.current_stream().wait_event(
                     transfer_weight_backward_finished_event
                 )
-                w_grad_buffers[selected_buffer] = grad_out.flatten(0, -2).T @ x.flatten(
+                # Ensure both tensors have the same dtype for matmul
+                w_grad_buffers[selected_buffer] = grad_out.float().flatten(0, -2).T @ x.float().flatten(
                     0, -2
-                ).float()
+                )
 
             # gradient accumulation is being performed directly
             with record_function(
